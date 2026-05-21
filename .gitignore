@@ -1,0 +1,5 @@
+.venv/
+*.log
+sbi-fx-ratekeeper/
+.idea
+schedule_fa_output.csv
