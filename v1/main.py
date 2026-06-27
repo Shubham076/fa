@@ -5,12 +5,18 @@ Converts Interactive Brokers US equity holdings → Schedule FA CSV (INR)
 
 Usage:
     python generate_schedule_fa.py holdings.csv
-    python generate_schedule_fa.py holdings.csv --fy-start 2024-04-01 --fy-end 2025-03-31
+    python generate_schedule_fa.py holdings.csv --cy-start 2024-01-01 --cy-end 2024-12-31
     python generate_schedule_fa.py holdings.csv --skip-update   # skip git pull
+
+Schedule FA in Indian ITR is reported on a CALENDAR-YEAR basis (Jan 1 – Dec 31)
+of the calendar year ending during the previous year. For AY 2025-26 the
+reporting period is CY 2024 (2024-01-01 → 2024-12-31).
 
 Input CSV columns (see input_template.csv):
     symbol, units, acquisition_date, acquisition_price, company_name, address, zip_code
-    Optional: nature, country, country_code, units_at_year_end, dividends_usd, proceeds_usd
+    Optional: nature, country, country_code,
+              units_at_year_end (defaults to units if not set),
+              dividends_usd, proceeds_usd
 """
 
 import argparse
@@ -20,8 +26,14 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import certifi
 import pandas as pd
-import yfinance as yf
+from curl_cffi import requests as _curl_requests  # noqa: E402
+import yfinance as yf  # noqa: E402
+
+_YF_SESSION = _curl_requests.Session(
+    impersonate="chrome", verify=certifi.where()
+)
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -35,12 +47,14 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─── Global Config (overridden by CLI args) ───────────────────────────────────
-FY_START = datetime(2024, 4, 1)
-FY_END = datetime(2025, 3, 31)
+# Schedule FA reports on the CALENDAR year (Jan 1 – Dec 31), not the Indian FY.
+CY_START = datetime(2024, 1, 1)
+CY_END = datetime(2024, 12, 31)
 
 BASE_DIR = Path(__file__).parent
+REPO_ROOT = BASE_DIR.parent
 RATEKEEPER_REPO = "https://github.com/sahilgupta/sbi-fx-ratekeeper"
-RATEKEEPER_DIR = BASE_DIR / "sbi-fx-ratekeeper"
+RATEKEEPER_DIR = REPO_ROOT / "sbi-fx-ratekeeper"
 
 # Cached SBI rate data by currency
 _RATE_CACHE: dict[str, pd.DataFrame] = {}
@@ -131,7 +145,10 @@ def get_sbi_tt_buy(target: datetime) -> tuple[float, datetime]:
     If no rate exists on target date, tries up to 10 subsequent days.
     """
     rates = _load_rates("USD")
-    target_date = pd.Timestamp(target).normalize()
+    ts = pd.Timestamp(target)
+    if ts.tzinfo is not None:
+        ts = ts.tz_localize(None)
+    target_date = ts.normalize()
     end_date = target_date + pd.Timedelta(days=10)
     matches = rates[(rates["DATE"] >= target_date) & (rates["DATE"] <= end_date)]
 
@@ -150,7 +167,7 @@ def get_sbi_tt_buy(target: datetime) -> tuple[float, datetime]:
 
 def _history(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
     """Download OHLCV history with retries."""
-    ticker = yf.Ticker(symbol)
+    ticker = yf.Ticker(symbol, session=_YF_SESSION)
     for _ in range(3):
         hist = ticker.history(
             start=start.strftime("%Y-%m-%d"),
@@ -211,58 +228,73 @@ def process_row(row: pd.Series) -> dict:
     """Compute all Schedule FA fields (in INR) for one holding."""
     symbol = str(row["symbol"]).strip().upper()
     units = float(row["units"])
+    # acquisition_date in the input CSV is expected as YYYY-MM-DD (e.g. 2024-03-01)
     acq_date = pd.to_datetime(row["acquisition_date"]).to_pydatetime()
 
     log.info(f"\n{'─' * 60}")
     log.info(f"  {symbol}  |  units={units}  |  acquired={acq_date.date()}")
 
-    # ── 1. Initial value — acquisition price from IB (user-provided) ──────────
-    price_acq = float(row["acquisition_price"])
-    rate_acq, d_acq = get_sbi_tt_buy(acq_date)
-    initial_inr = round(price_acq * rate_acq * units, 2)
+    # 1. Initial value of the investment
+    #    • Acquired during the CY  → IB acquisition price × SBI rate on acq_date × units.
+    #    • Held before CY (carry-forward) → close on first CY trading day × SBI rate
+    #      on Jan 1 × units (held at start of CY).
+    if acq_date >= CY_START:
+        initial_price_usd = float(row["acquisition_price"])
+        initial_date = acq_date
+        initial_source = "IB acquisition price"
+    else:
+        initial_price_usd = get_closing_price(symbol, CY_START)
+        initial_date = CY_START
+        initial_source = f"yfinance close on {CY_START.date()}"
+    initial_units = units
+    initial_fx, initial_fx_date = get_sbi_tt_buy(initial_date)
+    initial_inr = round(initial_price_usd * initial_fx * initial_units, 2)
     log.info(
-        f"  Initial:  ${price_acq:.4f} (IB) × ₹{rate_acq:.4f} × {units} "
-        f"= ₹{initial_inr:,.2f}  (SBI date used: {d_acq.date()})"
+        f"  Initial:  ${initial_price_usd:.4f} ({initial_source}) × ₹{initial_fx:.4f} "
+        f"× {initial_units} = ₹{initial_inr:,.2f}  (SBI date used: {initial_fx_date.date()})"
     )
 
-    # ── 2. Peak value — highest intraday high during FY via yfinance ──────────
-    period_start = max(FY_START, acq_date)
-    peak_price, peak_dt = get_peak_in_period(symbol, period_start, FY_END)
-    rate_peak, d_peak = get_sbi_tt_buy(peak_dt)
-    peak_inr = round(peak_price * rate_peak * units, 2)
+    # 2. Peak value — highest intraday high across the full CY (CY_START → CY_END)
+    peak_price_usd, peak_date = get_peak_in_period(symbol, CY_START, CY_END)
+    peak_fx, peak_fx_date = get_sbi_tt_buy(peak_date)
+    peak_inr = round(peak_price_usd * peak_fx * units, 2)
     log.info(
-        f"  Peak:     ${peak_price:.4f} on {peak_dt.date()} (yfinance) "
-        f"× ₹{rate_peak:.4f} × {units} = ₹{peak_inr:,.2f}  (SBI date used: {d_peak.date()})"
+        f"  Peak:     ${peak_price_usd:.4f} on {peak_date.date()} (yfinance) "
+        f"× ₹{peak_fx:.4f} × {units} = ₹{peak_inr:,.2f}  (SBI date used: {peak_fx_date.date()})"
     )
 
-    # ── 3. Closing balance — Mar 31 price via yfinance ────────────────────────
-    units_close = float(row.get("units_at_year_end", units))  # 0 if fully sold
-    if units_close > 0:
-        price_close = get_closing_price(symbol, FY_END)
-        rate_close, d_cl = get_sbi_tt_buy(FY_END)
-        closing_inr = round(price_close * rate_close * units_close, 2)
+    # 3. Closing balance — price on Dec 31 of the calendar year (CY_END)
+    # Sanity check: if there were sale proceeds during the CY, the user MUST
+    # set units_at_year_end explicitly (else we silently use `units`, which
+    # would double-count the sold shares in the closing balance).
+    proceeds_usd_val = float(row.get("proceeds_usd", 0) or 0)
+    has_year_end = (
+        "units_at_year_end" in row.index and pd.notna(row.get("units_at_year_end"))
+    )
+    if proceeds_usd_val > 0 and not has_year_end:
+        raise ValueError(
+            f"{symbol}: proceeds_usd={proceeds_usd_val} indicates a sale during the CY, "
+            "but units_at_year_end is not set. Provide units_at_year_end explicitly "
+            "(0 if fully sold, remaining units if partial sale)."
+        )
+    closing_units = float(row.get("units_at_year_end", units))  # 0 if fully sold
+    if closing_units > 0:
+        closing_price_usd = get_closing_price(symbol, CY_END)
+        closing_fx, closing_fx_date = get_sbi_tt_buy(CY_END)
+        closing_inr = round(closing_price_usd * closing_fx * closing_units, 2)
         log.info(
-            f"  Closing:  ${price_close:.4f} (yfinance) × ₹{rate_close:.4f} × {units_close} "
-            f"= ₹{closing_inr:,.2f}  (SBI date used: {d_cl.date()})"
+            f"  Closing:  ${closing_price_usd:.4f} (yfinance) × ₹{closing_fx:.4f} × {closing_units} "
+            f"= ₹{closing_inr:,.2f}  (SBI date used: {closing_fx_date.date()})"
         )
     else:
         closing_inr = 0.0
-        log.info("  Closing:  ₹0  (position fully sold/closed during FY)")
+        log.info("  Closing:  ₹0  (position fully sold/closed during CY)")
 
-    # ── 4. Dividends & proceeds (USD → INR at FY-end rate) ───────────────────
-    rate_fy_end, _ = get_sbi_tt_buy(FY_END)
-
-    if "dividends_inr" in row.index and pd.notna(row.get("dividends_inr")):
-        div_inr = float(row["dividends_inr"])
-    else:
-        div_inr = round(float(row.get("dividends_usd", 0) or 0) * rate_fy_end, 2)
-
-    if "proceeds_inr" in row.index and pd.notna(row.get("proceeds_inr")):
-        proc_inr = float(row["proceeds_inr"])
-    else:
-        proc_inr = round(float(row.get("proceeds_usd", 0) or 0) * rate_fy_end, 2)
-
-    log.info(f"  Dividends: ₹{div_inr:,.2f}   Proceeds: ₹{proc_inr:,.2f}")
+    # 4. Dividends & proceeds (USD → INR at SBI TT Buy on CY_END = Dec 31)
+    cy_end_fx, _ = get_sbi_tt_buy(CY_END)
+    dividends_inr = round(float(row.get("dividends_usd", 0) or 0) * cy_end_fx, 2)
+    proceeds_inr = round(float(row.get("proceeds_usd", 0) or 0) * cy_end_fx, 2)
+    log.info(f"  Dividends: ₹{dividends_inr:,.2f}   Proceeds: ₹{proceeds_inr:,.2f}")
 
     return {
         "Country/Region name": row.get("country", "UNITED STATES OF AMERICA"),
@@ -275,8 +307,8 @@ def process_row(row: pd.Series) -> dict:
         "Initial value of the investment": initial_inr,
         "Peak value of investment during the Period": peak_inr,
         "Closing balance": closing_inr,
-        "Total gross amount paid/credited with respect to the holding during the period": div_inr,
-        "Total gross proceeds from sale or redemption of investment during the period": proc_inr,
+        "Total gross amount paid/credited with respect to the holding during the period": dividends_inr,
+        "Total gross proceeds from sale or redemption of investment during the period": proceeds_inr,
     }
 
 
@@ -301,10 +333,20 @@ def generate(input_csv: Path, output_csv: Path) -> None:
             f"See input_template.csv for the expected format."
         )
 
-    rows, errors = [], []
+    rows, errors, units_records = [], [], []
     for i, (_, row) in enumerate(df.iterrows(), 1):
         try:
             rows.append(process_row(row))
+            units_val = float(row["units"])
+            end_raw = row.get("units_at_year_end")
+            end_val = float(end_raw) if pd.notna(end_raw) else units_val
+            units_records.append(
+                {
+                    "symbol": str(row["symbol"]).strip().upper(),
+                    "start": units_val,
+                    "end": end_val,
+                }
+            )
         except Exception as e:
             log.error(f"Row {i} ({row.get('symbol', '?')}): {e}")
             errors.append((i, row.get("symbol", "?"), str(e)))
@@ -312,13 +354,42 @@ def generate(input_csv: Path, output_csv: Path) -> None:
     out_df = pd.DataFrame(rows, columns=SCHEDULE_FA_COLS)
     out_df.to_csv(output_csv, index=False)
 
-    print(f"\n{'═' * 70}")
-    print("SCHEDULE FA — FINAL OUTPUT")
-    print(f"{'═' * 70}")
-    pd.set_option("display.max_columns", None)
-    pd.set_option("display.width", 200)
-    pd.set_option("display.float_format", "{:,.2f}".format)
-    print(out_df.to_string(index=False))
+    if not out_df.empty:
+        total_initial = out_df["Initial value of the investment"].sum()
+        total_peak = out_df["Peak value of investment during the Period"].sum()
+        total_closing = out_df["Closing balance"].sum()
+        total_dividends = out_df[
+            "Total gross amount paid/credited with respect to the holding during the period"
+        ].sum()
+        total_proceeds = out_df[
+            "Total gross proceeds from sale or redemption of investment during the period"
+        ].sum()
+        print(f"\n{'─' * 70}")
+        print(f"TOTALS across {len(out_df)} holding(s) (INR)")
+        print(f"{'─' * 70}")
+        print(f"  Initial value     : ₹{total_initial:>20,.2f}")
+        print(f"  Peak value        : ₹{total_peak:>20,.2f}")
+        print(f"  Closing balance   : ₹{total_closing:>20,.2f}")
+        print(f"  Dividends (gross) : ₹{total_dividends:>20,.2f}")
+        print(f"  Proceeds (gross)  : ₹{total_proceeds:>20,.2f}")
+
+        summary = (
+            pd.DataFrame(units_records)
+            .groupby("symbol")[["start", "end"]]
+            .sum()
+            .sort_index()
+        )
+        print(f"\n{'─' * 70}")
+        print(f"UNITS per symbol")
+        print(f"{'─' * 70}")
+        print(f"  {'Symbol':<10} {'Start':>12} {'End':>12} {'Change':>12}")
+        for sym, urow in summary.iterrows():
+            change = urow["end"] - urow["start"]
+            sign = "+" if change > 0 else ""
+            print(
+                f"  {sym:<10} {urow['start']:>12,.4f} {urow['end']:>12,.4f} "
+                f"{sign}{change:>11,.4f}"
+            )
 
     if errors:
         print(f"\n⚠️  Errors for {len(errors)} row(s):")
@@ -343,25 +414,25 @@ def main() -> None:
         help="Output CSV filename (default: schedule_fa_output.csv)",
     )
     parser.add_argument(
-        "--fy-start",
-        default="2024-04-01",
-        help="Financial year start date (default: 2024-04-01)",
+        "--cy-start",
+        default="2024-01-01",
+        help="Calendar year start date (default: 2024-01-01)",
     )
     parser.add_argument(
-        "--fy-end",
-        default="2025-03-31",
-        help="Financial year end date   (default: 2025-03-31)",
+        "--cy-end",
+        default="2024-12-31",
+        help="Calendar year end date   (default: 2024-12-31)",
     )
     parser.add_argument(
         "--skip-update", action="store_true", help="Skip git pull for sbi-fx-ratekeeper"
     )
     args = parser.parse_args()
 
-    global FY_START, FY_END
-    FY_START = datetime.strptime(args.fy_start, "%Y-%m-%d")
-    FY_END = datetime.strptime(args.fy_end, "%Y-%m-%d")
+    global CY_START, CY_END
+    CY_START = datetime.strptime(args.cy_start, "%Y-%m-%d")
+    CY_END = datetime.strptime(args.cy_end, "%Y-%m-%d")
 
-    log.info(f"Financial Year: {FY_START.date()} → {FY_END.date()}")
+    log.info(f"Calendar Year: {CY_START.date()} → {CY_END.date()}")
 
     setup_ratekeeper(skip_update=args.skip_update)
 

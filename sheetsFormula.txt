@@ -1,0 +1,14 @@
+A2 => column for stock symbol example "AAPL", "S"
+
+Peak Price for stock
+=MAX(INDEX(GOOGLEFINANCE(A2,"high",DATE(2025,1,1),DATE(2025,12,31),"DAILY"),,2))
+
+Peak day for stock
+=TEXT(LET(
+  data, GOOGLEFINANCE(A2,"high",DATE(2025,1,1),DATE(2025,12,31),"DAILY"),
+  highs, INDEX(data,,2),
+  INDEX(data, MATCH(MAX(highs), highs, 0), 1)
+), "yyyy-mm-dd")
+
+Closing Price for stock
+=INDEX(GOOGLEFINANCE(A2,"close",DATE(2025,12,31)), 2, 2)

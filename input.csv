@@ -1,4 +1,0 @@
-symbol,units,acquisition_date,acquisition_price,company_name,address,zip_code,nature,country,country_code,units_at_year_end,dividends_usd,proceeds_usd
-S,150,2024-03-01,18.25,SentinelOne,444 Castro Street Suite 400 Mountain View CA,94041,Company,UNITED STATES OF AMERICA,2,150,0,0
-AAPL,10,2023-08-15,178.50,Apple Inc,One Apple Park Way Cupertino CA,95014,Company,UNITED STATES OF AMERICA,2,10,15.50,0
-TSLA,5,2024-06-10,182.30,Tesla Inc,1 Tesla Road Austin TX,78725,Company,UNITED STATES OF AMERICA,2,0,0,4500.00
