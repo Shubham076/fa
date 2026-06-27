@@ -4,9 +4,9 @@ Schedule FA Generator for Indian ITR
 Converts Interactive Brokers US equity holdings → Schedule FA CSV (INR)
 
 Usage:
-    python generate_schedule_fa.py holdings.csv
-    python generate_schedule_fa.py holdings.csv --cy-start 2024-01-01 --cy-end 2024-12-31
-    python generate_schedule_fa.py holdings.csv --skip-update   # skip git pull
+    python3 generate_schedule_fa.py input.csv
+    python3 generate_schedule_fa.py input.csv --cy-start 2024-01-01 --cy-end 2024-12-31
+    python3 generate_schedule_fa.py input.csv --skip-update   # skip git pull
 
 Schedule FA in Indian ITR is reported on a CALENDAR-YEAR basis (Jan 1 – Dec 31)
 of the calendar year ending during the previous year. For AY 2025-26 the
@@ -235,13 +235,13 @@ def process_row(row: pd.Series) -> dict:
     log.info(f"  {symbol}  |  units={units}  |  acquired={acq_date.date()}")
 
     # 1. Initial value of the investment
-    #    • Acquired during the CY  → IB acquisition price × SBI rate on acq_date × units.
+    #    • Acquired during the CY  → Acquisition price × SBI rate on acq_date × units.
     #    • Held before CY (carry-forward) → close on first CY trading day × SBI rate
     #      on Jan 1 × units (held at start of CY).
     if acq_date >= CY_START:
         initial_price_usd = float(row["acquisition_price"])
         initial_date = acq_date
-        initial_source = "IB acquisition price"
+        initial_source = "Acquisition price"
     else:
         initial_price_usd = get_closing_price(symbol, CY_START)
         initial_date = CY_START

@@ -10,11 +10,11 @@ silently dividend-adjusts historical prices.
 Schedule FA in Indian ITR is reported on a CALENDAR-YEAR basis (Jan 1 – Dec 31).
 
 Usage:
-    python main_v2.py holdings.csv --prices prices.csv
-    python main_v2.py holdings.csv --prices prices.csv --cy-start 2024-01-01 --cy-end 2024-12-31
-    python main_v2.py holdings.csv --prices prices.csv --skip-update
+    python3 main_v2.py input.csv --prices prices.csv
+    python3 main.py input.csv --prices prices.csv --cy-start 2025-01-01 --cy-end 2025-12-31
+    python3 main_v2.py input.csv --prices prices.csv --skip-update
 
-holdings.csv columns (same as main.py):
+input.csv columns (same as main.py):
     symbol, units, acquisition_date, acquisition_price, company_name, address, zip_code
     Optional: nature, country, country_code,
               units_at_year_end (defaults to units if not set),
@@ -227,13 +227,13 @@ def process_row(row: pd.Series) -> dict:
     prices = _get_price_entry(symbol)
 
     # 1. Initial value of the investment
-    #    • Acquired during the CY  → IB acquisition price × SBI rate on acq_date × units.
+    #    • Acquired during the CY  → Acquisition price × SBI rate on acq_date × units.
     #    • Held before CY (carry-forward) → close on CY_START × SBI rate on Jan 1
     #      × units (held at start of CY).
     if acq_date >= CY_START:
         initial_price_usd = float(row["acquisition_price"])
         initial_date = acq_date
-        initial_source = "IB acquisition price"
+        initial_source = "Acquisition price"
     else:
         if "initial_price" not in prices:
             raise ValueError(
