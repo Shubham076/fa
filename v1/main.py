@@ -4,9 +4,9 @@ Schedule FA Generator for Indian ITR
 Converts Interactive Brokers US equity holdings → Schedule FA CSV (INR)
 
 Usage:
-    python3 generate_schedule_fa.py input.csv
-    python3 generate_schedule_fa.py input.csv --cy-start 2024-01-01 --cy-end 2024-12-31
-    python3 generate_schedule_fa.py input.csv --skip-update   # skip git pull
+    python3 main.py input.csv
+    python3 main.py input.csv --year 2024
+    python3 main.py input.csv --skip-update   # skip git pull
 
 Schedule FA in Indian ITR is reported on a CALENDAR-YEAR basis (Jan 1 – Dec 31)
 of the calendar year ending during the previous year. For AY 2025-26 the
@@ -414,14 +414,10 @@ def main() -> None:
         help="Output CSV filename (default: schedule_fa_output.csv)",
     )
     parser.add_argument(
-        "--cy-start",
-        default="2024-01-01",
-        help="Calendar year start date (default: 2024-01-01)",
-    )
-    parser.add_argument(
-        "--cy-end",
-        default="2024-12-31",
-        help="Calendar year end date   (default: 2024-12-31)",
+        "--year",
+        type=int,
+        default=2024,
+        help="Calendar year to report (default: 2024)",
     )
     parser.add_argument(
         "--skip-update", action="store_true", help="Skip git pull for sbi-fx-ratekeeper"
@@ -429,8 +425,8 @@ def main() -> None:
     args = parser.parse_args()
 
     global CY_START, CY_END
-    CY_START = datetime.strptime(args.cy_start, "%Y-%m-%d")
-    CY_END = datetime.strptime(args.cy_end, "%Y-%m-%d")
+    CY_START = datetime(args.year, 1, 1)
+    CY_END = datetime(args.year, 12, 31)
 
     log.info(f"Calendar Year: {CY_START.date()} → {CY_END.date()}")
 

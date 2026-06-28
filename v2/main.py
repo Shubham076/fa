@@ -10,11 +10,11 @@ silently dividend-adjusts historical prices.
 Schedule FA in Indian ITR is reported on a CALENDAR-YEAR basis (Jan 1 – Dec 31).
 
 Usage:
-    python3 main_v2.py input.csv --prices prices.csv
-    python3 main.py input.csv --prices prices.csv --cy-start 2025-01-01 --cy-end 2025-12-31
-    python3 main_v2.py input.csv --prices prices.csv --skip-update
+    python3 main.py input.csv --prices prices.csv
+    python3 main.py input.csv --prices prices.csv --year 2025
+    python3 main.py input.csv --prices prices.csv --skip-update
 
-input.csv columns (same as main.py):
+rsu.csv columns (same as main.py):
     symbol, units, acquisition_date, acquisition_price, company_name, address, zip_code
     Optional: nature, country, country_code,
               units_at_year_end (defaults to units if not set),
@@ -419,14 +419,10 @@ def main() -> None:
         help="Output CSV filename (default: schedule_fa_output.csv)",
     )
     parser.add_argument(
-        "--cy-start",
-        default="2024-01-01",
-        help="Calendar year start date (default: 2024-01-01)",
-    )
-    parser.add_argument(
-        "--cy-end",
-        default="2024-12-31",
-        help="Calendar year end date   (default: 2024-12-31)",
+        "--year",
+        type=int,
+        default=2024,
+        help="Calendar year to report (default: 2024)",
     )
     parser.add_argument(
         "--skip-update", action="store_true", help="Skip git pull for sbi-fx-ratekeeper"
@@ -434,8 +430,8 @@ def main() -> None:
     args = parser.parse_args()
 
     global CY_START, CY_END
-    CY_START = datetime.strptime(args.cy_start, "%Y-%m-%d")
-    CY_END = datetime.strptime(args.cy_end, "%Y-%m-%d")
+    CY_START = datetime(args.year, 1, 1)
+    CY_END = datetime(args.year, 12, 31)
 
     log.info(f"Calendar Year: {CY_START.date()} → {CY_END.date()}")
 
