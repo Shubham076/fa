@@ -227,23 +227,21 @@ def process_row(row: pd.Series) -> dict:
     prices = _get_price_entry(symbol)
 
     # 1. Initial value of the investment
-    #    • Acquired during the CY  → Acquisition price × SBI rate on acq_date × units.
-    #    • Held before CY (carry-forward) → close on CY_START × SBI rate on Jan 1
-    #      × units (held at start of CY).
-    if acq_date >= CY_START:
-        initial_price_usd = float(row["acquisition_price"])
-        initial_date = acq_date
-        initial_source = "Acquisition price"
-    else:
-        if "initial_price" not in prices:
-            raise ValueError(
-                f"{symbol}: carry-forward holding (acquired {acq_date.date()}, "
-                f"before CY_START {CY_START.date()}) needs an `initial_price` "
-                f"column in prices CSV (closing price on {CY_START.date()})."
-            )
-        initial_price_usd = prices["initial_price"]
-        initial_date = CY_START
-        initial_source = f"prices.csv close on {CY_START.date()}"
+    #    The "initial value" is the ORIGINAL acquisition cost of the lot and is
+    #    constant for every year the lot is held:
+    #        Acquisition price × SBI rate on acq_date × units.
+    #    • Acquired during the CY   → cost basis for this year's schedule.
+    #    • Held before CY (carry-forward, acq_date < CY_START) → same original
+    #      cost basis carried forward unchanged from the previous year's schedule
+    #      (only peak & closing below are recomputed for the current year).
+    is_carry_forward = acq_date < CY_START
+    initial_price_usd = float(row["acquisition_price"])
+    initial_date = acq_date
+    initial_source = (
+        "Acquisition price (carry-forward)"
+        if is_carry_forward
+        else "Acquisition price"
+    )
     initial_units = units
     initial_fx, initial_fx_date = get_sbi_tt_buy(initial_date)
     initial_inr = round(initial_price_usd * initial_fx * initial_units, 2)
