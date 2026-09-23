@@ -324,33 +324,56 @@ SCHEDULE_FA_COLS = [
 
 
 AUDIT_TRAIL_COLS = [
-    "symbol",
-    "benefit_type",
-    "units",
-    "units_at_start",
-    "acquisition_date",
-    "initial_price_usd",
-    "initial_source",
-    "initial_fx",
-    "initial_fx_date",
-    "initial_inr",
-    "peak_price_usd",
-    "peak_date",
-    "peak_fx",
-    "peak_fx_date",
-    "peak_inr",
-    "units_at_end",
-    "closing_price_usd",
-    "closing_fx",
-    "closing_fx_date",
-    "closing_inr",
-    "dividends_usd",
-    "dividends_inr",
-    "units_sold",
-    "sales",
-    "proceeds_usd",
-    "proceeds_inr",
+    "Symbol",
+    "Type",
+    "Units",
+    "Initial Date",
+    "Initial Value (USD)",
+    "Initial Value (INR)",
+    "Peak Date",
+    "Peak Value (USD)",
+    "Peak Value (INR)",
+    "Closing Date",
+    "Closing Value (USD)",
+    "Closing Value (INR)",
+    "Dividends Date",
+    "Dividends Value (USD)",
+    "Dividends Value (INR)",
+    "Sale Dates",
+    "Sale Value (USD)",
+    "Sale Value (INR)",
 ]
+
+
+def _amount(value: float) -> str:
+    """Thousands separators with 2–4 decimals (trailing zeros trimmed)."""
+    text = f"{value:,.4f}".rstrip("0")
+    return text + "0" * (2 - len(text.split(".")[1]))
+
+
+def _units(value: float) -> str:
+    return f"{value:,.6f}".rstrip("0").rstrip(".")
+
+
+def _audit_date(date: datetime, fx_date: datetime) -> str:
+    """Date, plus the SBI rate date when a different day's rate was used."""
+    text = date.strftime("%Y-%m-%d")
+    if fx_date.date() != date.date():
+        text += f" (SBI date: {fx_date:%Y-%m-%d})"
+    return text
+
+
+def _audit_usd(units: float, price_usd: float) -> str:
+    return f"{_units(units)} × ${_amount(price_usd)} = ${units * price_usd:,.2f}"
+
+
+def _audit_inr(value_usd: float, fx: float, inr: float) -> str:
+    return f"${value_usd:,.2f} × ₹{_amount(fx)} (TT Buy) = ₹{inr:,.2f}"
+
+
+def _audit_join(parts: list[str], total: str) -> str:
+    text = " | ".join(parts)
+    return f"{text} → total {total}" if len(parts) > 1 else text
 
 
 def process_row(row: pd.Series, sales: list[dict]) -> tuple[dict, dict] | None:
@@ -433,23 +456,24 @@ def process_row(row: pd.Series, sales: list[dict]) -> tuple[dict, dict] | None:
     dividends_raw = row.get("dividends_usd")
     dividends_usd = float(dividends_raw) if pd.notna(dividends_raw) else 0.0
     dividends_inr = 0.0
+    dividends_fx = dividends_fx_date = None
     if dividends_usd:
-        cy_end_fx, _ = get_sbi_tt_buy(CY_END)
-        dividends_inr = round(dividends_usd * cy_end_fx, 2)
+        dividends_fx, dividends_fx_date = get_sbi_tt_buy(CY_END)
+        dividends_inr = round(dividends_usd * dividends_fx, 2)
 
     # 5. Gross sale proceeds (each sale: units × sale price × SBI TT Buy on sale date)
     proceeds_usd = 0.0
     proceeds_inr = 0.0
-    sale_notes = []
+    sale_dates, sale_usd, sale_inr = [], [], []
     for s in sales_in_cy:
         sale_fx, sale_fx_date = get_sbi_tt_buy(s["sale_date"])
         gross_usd = s["units"] * s["sale_price"]
         gross_inr = round(gross_usd * sale_fx, 2)
         proceeds_usd += gross_usd
         proceeds_inr += gross_inr
-        sale_notes.append(
-            f"{s['sale_date'].date()}: {s['units']:g} @ ${s['sale_price']:.4f} × ₹{sale_fx:.4f}"
-        )
+        sale_dates.append(_audit_date(s["sale_date"], sale_fx_date))
+        sale_usd.append(_audit_usd(s["units"], s["sale_price"]))
+        sale_inr.append(_audit_inr(gross_usd, sale_fx, gross_inr))
         log.info(
             f"  Sale:     {s['units']:g} × ${s['sale_price']:.4f} on {s['sale_date'].date()} "
             f"× ₹{sale_fx:.4f} = ₹{gross_inr:,.2f}  (SBI date used: {sale_fx_date.date()})"
@@ -473,37 +497,40 @@ def process_row(row: pd.Series, sales: list[dict]) -> tuple[dict, dict] | None:
         "Total gross proceeds from sale or redemption of investment during the period": proceeds_inr,
     }
 
+    held_at_end = closing_price_usd is not None
     audit_row = {
-        "symbol": symbol,
-        "benefit_type": _benefit_type(row.get("benefit_type")),
-        "units": units,
-        "units_at_start": units_at_start,
-        "acquisition_date": acq_date.strftime("%Y-%m-%d"),
-        "initial_price_usd": round(initial_price_usd, 4),
-        "initial_source": initial_source,
-        "initial_fx": round(initial_fx, 4),
-        "initial_fx_date": initial_fx_date.strftime("%Y-%m-%d"),
-        "initial_inr": initial_inr,
-        "peak_price_usd": round(peak_price_usd, 4),
-        "peak_date": peak_date.strftime("%Y-%m-%d"),
-        "peak_fx": round(peak_fx, 4),
-        "peak_fx_date": peak_fx_date.strftime("%Y-%m-%d"),
-        "peak_inr": peak_inr,
-        "units_at_end": closing_units,
-        "closing_price_usd": (
-            round(closing_price_usd, 4) if closing_price_usd is not None else None
+        "Symbol": symbol,
+        "Type": _benefit_type(row.get("benefit_type")),
+        "Units": (
+            f"{_units(units_at_start)} (carry forward)"
+            if acq_date < CY_START
+            else _units(units_at_start)
         ),
-        "closing_fx": round(closing_fx, 4) if closing_fx is not None else None,
-        "closing_fx_date": (
-            closing_fx_date.strftime("%Y-%m-%d") if closing_fx_date is not None else None
+        "Initial Date": _audit_date(initial_date, initial_fx_date),
+        "Initial Value (USD)": _audit_usd(initial_units, initial_price_usd),
+        "Initial Value (INR)": _audit_inr(initial_units * initial_price_usd, initial_fx, initial_inr),
+        "Peak Date": _audit_date(peak_date, peak_fx_date),
+        "Peak Value (USD)": _audit_usd(units_at_start, peak_price_usd),
+        "Peak Value (INR)": _audit_inr(units_at_start * peak_price_usd, peak_fx, peak_inr),
+        "Closing Date": _audit_date(CY_END, closing_fx_date) if held_at_end else "",
+        "Closing Value (USD)": (
+            _audit_usd(closing_units, closing_price_usd) if held_at_end else "Fully sold"
         ),
-        "closing_inr": closing_inr,
-        "dividends_usd": dividends_usd,
-        "dividends_inr": dividends_inr,
-        "units_sold": units_sold,
-        "sales": "; ".join(sale_notes),
-        "proceeds_usd": proceeds_usd,
-        "proceeds_inr": proceeds_inr,
+        "Closing Value (INR)": (
+            _audit_inr(closing_units * closing_price_usd, closing_fx, closing_inr)
+            if held_at_end
+            else "Fully sold"
+        ),
+        "Dividends Date": _audit_date(CY_END, dividends_fx_date) if dividends_usd else "",
+        "Dividends Value (USD)": f"${_amount(dividends_usd)}" if dividends_usd else "",
+        "Dividends Value (INR)": (
+            _audit_inr(dividends_usd, dividends_fx, dividends_inr) if dividends_usd else ""
+        ),
+        "Sale Dates": " | ".join(sale_dates),
+        "Sale Value (USD)": _audit_join(sale_usd, f"${proceeds_usd:,.2f}"),
+        "Sale Value (INR)": _audit_join(sale_inr, f"₹{proceeds_inr:,.2f}"),
+        "_units_at_start": units_at_start,
+        "_units_at_end": closing_units,
     }
 
     return fa_row, audit_row
@@ -556,9 +583,9 @@ def generate(input_csv: Path, output_csv: Path, sales_csv: Path | None = None) -
             audit_rows.append(audit_row)
             units_records.append(
                 {
-                    "symbol": audit_row["symbol"],
-                    "start": audit_row["units_at_start"],
-                    "end": audit_row["units_at_end"],
+                    "symbol": audit_row["Symbol"],
+                    "start": audit_row["_units_at_start"],
+                    "end": audit_row["_units_at_end"],
                 }
             )
         except Exception as e:
@@ -570,7 +597,7 @@ def generate(input_csv: Path, output_csv: Path, sales_csv: Path | None = None) -
 
     audit_csv = output_csv.with_name(f"{output_csv.stem}_audit_trail.csv")
     audit_df = pd.DataFrame(audit_rows, columns=AUDIT_TRAIL_COLS)
-    audit_df.to_csv(audit_csv, index=False)
+    audit_df.to_csv(audit_csv, index=False, encoding="utf-8-sig")
 
     if not out_df.empty:
         total_initial = out_df["Initial value of the investment"].sum()

@@ -250,7 +250,43 @@ def test_process_row_audit_has_all_columns(fa, set_rates, write, cols, lot_row):
     set_rates()
     fa.load_prices(write("prices.csv", cols["prices_2026"]))
     _, audit = fa.process_row(lot_row(), [])
-    assert list(audit) == fa.AUDIT_TRAIL_COLS
+    assert [k for k in audit if not k.startswith("_")] == fa.AUDIT_TRAIL_COLS
+
+
+# ─── audit trail formatting ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "value, text",
+    [(27.9, "27.90"), (95.5, "95.50"), (12.0, "12.00"), (82.4712, "82.4712"), (1234.5, "1,234.50")],
+)
+def test_amount_format(fa, value, text):
+    assert fa._amount(value) == text
+
+
+def test_units_format(fa):
+    assert fa._units(442.0) == "442"
+    assert fa._units(0.5) == "0.5"
+    assert fa._units(1500.0) == "1,500"
+
+
+def test_audit_date_notes_sbi_date_only_when_different(fa):
+    assert fa._audit_date(datetime(2026, 7, 15), datetime(2026, 7, 15)) == "2026-07-15"
+    assert (
+        fa._audit_date(datetime(2026, 7, 15), datetime(2026, 7, 16))
+        == "2026-07-15 (SBI date: 2026-07-16)"
+    )
+
+
+def test_audit_calculations(fa):
+    assert fa._audit_usd(442, 24.26) == "442 × $24.26 = $10,722.92"
+    assert fa._audit_inr(10722.92, 95.5, 1024038.86) == "$10,722.92 × ₹95.50 (TT Buy) = ₹1,024,038.86"
+
+
+def test_audit_join_adds_total_only_for_multiple_parts(fa):
+    assert fa._audit_join(["a"], "$1.00") == "a"
+    assert fa._audit_join(["a", "b"], "$2.00") == "a | b → total $2.00"
+    assert fa._audit_join([], "$0.00") == ""
 
 
 # ─── generate (generic) ───────────────────────────────────────────────────────

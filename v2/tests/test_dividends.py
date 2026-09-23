@@ -12,14 +12,16 @@ def priced(fa, set_rates, write, cols):
 def test_dividends_converted_at_year_end_rate(fa, priced, lot_row, cols):
     fa_row, audit = fa.process_row(lot_row(dividends=5), [])
     assert fa_row[cols["dividends"]] == 5 * 100
-    assert audit["dividends_usd"] == 5.0
-    assert audit["dividends_inr"] == 500.0
+    assert audit["Dividends Date"] == "2026-12-31"
+    assert audit["Dividends Value (USD)"] == "$5.00"
+    assert audit["Dividends Value (INR)"] == "$5.00 × ₹100.00 (TT Buy) = ₹500.00"
 
 
 def test_blank_dividends_treated_as_zero(fa, priced, lot_row, cols):
     fa_row, audit = fa.process_row(lot_row(dividends=float("nan")), [])
     assert fa_row[cols["dividends"]] == 0.0
-    assert audit["dividends_usd"] == 0.0
+    assert audit["Dividends Value (USD)"] == ""
+    assert audit["Dividends Value (INR)"] == ""
 
 
 def test_zero_dividends_need_no_year_end_rate_when_sold(fa, priced, lot_row, sale, cols):
@@ -46,4 +48,4 @@ def test_generate_without_dividends_column(fa, run_generate, cols):
     )
     out, audit = run_generate(text)
     assert out[cols["dividends"]].tolist() == [0.0]
-    assert audit["benefit_type"].isna().all()
+    assert audit["Type"].isna().all()

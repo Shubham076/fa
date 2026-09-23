@@ -98,6 +98,21 @@ Outputs:
 - `outputs/output_audit_trail.csv` — every price, rate, unit count and sale used
 - `logs/schedule_fa.log` — step-by-step calculation log
 
+### Audit trail columns
+
+One row per lot, in the same order as `output.csv`:
+
+| Column | Example |
+|---|---|
+| `Symbol`, `Type` | `S`, `SO` |
+| `Units` | `442 (carry forward)` — units held on Jan 1 (lots from earlier years are marked) |
+| `Initial / Peak / Closing / Dividends Date` | `2026-09-17`, or `2026-07-15 (SBI date: 2026-07-16)` when that day had no SBI rate |
+| `… Value (USD)` | `442 × $24.26 = $10,722.92` |
+| `… Value (INR)` | `$10,722.92 × ₹95.50 (TT Buy) = ₹1,024,038.86` |
+| `Sale Dates`, `Sale Value (USD/INR)` | one entry per sale, separated by ` \| `, with `→ total …` when there are several |
+
+`Closing Value` reads `Fully sold` when no units are left on Dec 31.
+
 ## Trying other values without committing them
 
 Everything in `inputs/`, `outputs/` and `logs/` is git-ignored, so experiment freely:

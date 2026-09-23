@@ -86,9 +86,16 @@ def test_fully_sold_during_year(fa, priced, lot_row, sale, cols):
     assert fa_row[cols["proceeds"]] == 4 * 18 * 85 + 6 * 19 * 88
     assert fa_row[cols["peak"]] == 20 * 90 * 10
     assert fa_row[cols["initial"]] == 12 * 80 * 10
-    assert audit["proceeds_usd"] == 186.0
-    assert (audit["units_at_start"], audit["units_sold"], audit["units_at_end"]) == (10, 10, 0)
-    assert "2026-04-01" in audit["sales"] and "2026-05-04" in audit["sales"]
+    assert audit["Units"] == "10 (carry forward)"
+    assert audit["Closing Value (INR)"] == "Fully sold"
+    assert audit["Sale Dates"] == "2026-04-01 | 2026-05-04"
+    assert audit["Sale Value (USD)"] == (
+        "4 × $18.00 = $72.00 | 6 × $19.00 = $114.00 → total $186.00"
+    )
+    assert audit["Sale Value (INR)"] == (
+        "$72.00 × ₹85.00 (TT Buy) = ₹6,120.00 | $114.00 × ₹88.00 (TT Buy) = ₹10,032.00"
+        " → total ₹16,152.00"
+    )
 
 
 def test_partially_sold_during_year(fa, priced, lot_row, sale, cols):
@@ -99,7 +106,8 @@ def test_partially_sold_during_year(fa, priced, lot_row, sale, cols):
 
 def test_partially_sold_before_year_uses_remaining_units(fa, priced, lot_row, sale, cols):
     fa_row, audit = fa.process_row(lot_row(), [sale("2025-10-01", 3, 18)])
-    assert audit["units_at_start"] == 7
+    assert audit["Units"] == "7 (carry forward)"
+    assert audit["Peak Value (USD)"] == "7 × $20.00 = $140.00"
     assert fa_row[cols["initial"]] == 12 * 80 * 7
     assert fa_row[cols["peak"]] == 20 * 90 * 7
     assert fa_row[cols["closing"]] == 15 * 100 * 7
@@ -116,7 +124,8 @@ def test_vested_after_year_is_skipped(fa, priced, lot_row):
 
 def test_sales_after_year_are_ignored(fa, priced, lot_row, sale, cols):
     fa_row, audit = fa.process_row(lot_row(), [sale("2027-02-01", 10, 18)])
-    assert audit["units_at_end"] == 10
+    assert audit["Closing Value (USD)"] == "10 × $15.00 = $150.00"
+    assert audit["Sale Dates"] == ""
     assert fa_row[cols["closing"]] == 15 * 100 * 10
 
 
@@ -140,12 +149,12 @@ def test_generate_all_options_exercised_and_sold(fa, run_generate, input_csv, co
     assert out[cols["closing"]].tolist() == [0.0, 0.0]
     assert out[cols["proceeds"]].tolist() == [10 * 18 * 85, 2 * 18 * 85 + 3 * 19 * 88]
     assert out[cols["initial"]].tolist() == [12 * 80 * 10, 12 * 90 * 5]
-    assert audit["initial_source"].tolist() == [
-        "Acquisition price (carry-forward)",
-        "Acquisition price",
+    assert audit["Units"].tolist() == ["10 (carry forward)", "5"]
+    assert audit["Closing Value (INR)"].tolist() == ["Fully sold", "Fully sold"]
+    assert audit["Sale Value (USD)"].tolist() == [
+        "10 × $18.00 = $180.00",
+        "2 × $18.00 = $36.00 | 3 × $19.00 = $57.00 → total $93.00",
     ]
-    assert audit["units_sold"].sum() == 15
-    assert audit["units_at_end"].sum() == 0
 
 
 def test_generate_oversell_exits(fa, run_generate, input_csv, cols):

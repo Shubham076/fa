@@ -6,7 +6,8 @@ import pytest
 def test_dividends_converted_at_year_end_rate(fa, market, lot_row, cols):
     fa_row, audit = fa.process_row(lot_row(dividends=5), [])
     assert fa_row[cols["dividends"]] == 5 * 100
-    assert audit["dividends_usd"] == 5.0
+    assert audit["Dividends Value (USD)"] == "$5.00"
+    assert audit["Dividends Value (INR)"] == "$5.00 × ₹100.00 (TT Buy) = ₹500.00"
 
 
 def test_blank_dividends_treated_as_zero(fa, market, lot_row, cols):
