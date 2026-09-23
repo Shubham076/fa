@@ -9,20 +9,24 @@ silently dividend-adjusts historical prices.
 
 Schedule FA in Indian ITR is reported on a CALENDAR-YEAR basis (Jan 1 – Dec 31).
 
-Usage:
-    python3 main.py input.csv --prices prices.csv
-    python3 main.py input.csv --prices prices.csv --year 2025
-    python3 main.py input.csv --prices prices.csv --skip-update
+Usage (defaults read inputs/input.csv, inputs/prices.csv, inputs/sales.csv if present;
+write outputs/output.csv and logs/schedule_fa.log):
+    python3 main.py --year 2025
+    python3 main.py --year 2026 --output output_2026.csv
+    python3 main.py inputs/input_test.csv --prices inputs/prices.csv --sales inputs/sales.csv --year 2026
+    python3 main.py --year 2025 --skip-update
 
-rsu.csv columns (same as main.py):
+input.csv columns (one row per acquired lot):
     symbol, units, acquisition_date, acquisition_price, company_name, address, zip_code
-    Optional: nature, country, country_code,
-              units_at_year_end (defaults to units if not set),
-              dividends_usd, proceeds_usd
+    Optional: benefit_type, nature, country, country_code, dividends_usd
 
-prices.csv columns:
-    symbol, peak_price, peak_date, closing_price
-    Optional: initial_price   (close on CY_START — only needed for carry-forward holdings)
+sales.csv columns (one row per sale, all years):
+    symbol, sale_date, units, sale_price
+    Optional: benefit_type, acquisition_date (sell from that lot; otherwise FIFO
+              across lots with the same symbol + benefit_type)
+
+prices.csv columns (one row per symbol per year):
+    symbol, year, peak_price, peak_date, closing_price
 """
 
 import argparse
@@ -35,15 +39,21 @@ from pathlib import Path
 import pandas as pd
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("schedule_fa.log", mode="w"),
-    ],
-)
 log = logging.getLogger(__name__)
+
+
+def setup_logging() -> None:
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(LOG_FILE, mode="w"),
+        ],
+        force=True,
+    )
+
 
 # ─── Global Config (overridden by CLI args) ───────────────────────────────────
 # Schedule FA reports on the CALENDAR year (Jan 1 – Dec 31), not the Indian FY.
@@ -52,14 +62,18 @@ CY_END = datetime(2024, 12, 31)
 
 BASE_DIR = Path(__file__).parent
 REPO_ROOT = BASE_DIR.parent
+INPUTS_DIR = BASE_DIR / "inputs"
+OUTPUTS_DIR = BASE_DIR / "outputs"
+LOGS_DIR = BASE_DIR / "logs"
+LOG_FILE = LOGS_DIR / "schedule_fa.log"
 RATEKEEPER_REPO = "https://github.com/sahilgupta/sbi-fx-ratekeeper"
 RATEKEEPER_DIR = REPO_ROOT / "sbi-fx-ratekeeper"
 
 # Cached SBI rate data by currency
 _RATE_CACHE: dict[str, pd.DataFrame] = {}
 
-# Loaded prices.csv keyed by symbol
-_PRICES: dict[str, dict] = {}
+# Loaded prices.csv keyed by (symbol, year)
+_PRICES: dict[tuple[str, int], dict] = {}
 
 
 # ─── SBI FX Ratekeeper ────────────────────────────────────────────────────────
@@ -160,11 +174,11 @@ def get_sbi_tt_buy(target: datetime) -> tuple[float, datetime]:
 
 
 def load_prices(prices_csv: Path) -> None:
-    """Load the manually-supplied per-symbol price CSV into _PRICES."""
+    """Load the manually-supplied per-symbol, per-year prices into _PRICES."""
     df = pd.read_csv(prices_csv)
     df.columns = df.columns.str.strip().str.lower()
 
-    required = {"symbol", "peak_price", "peak_date", "closing_price"}
+    required = {"symbol", "year", "peak_price", "peak_date", "closing_price"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(
@@ -174,26 +188,114 @@ def load_prices(prices_csv: Path) -> None:
 
     for _, row in df.iterrows():
         symbol = str(row["symbol"]).strip().upper()
+        year = int(row["year"])
+        if (symbol, year) in _PRICES:
+            raise ValueError(f"Prices CSV {prices_csv}: duplicate row for {symbol} {year}.")
         peak_date = pd.to_datetime(row["peak_date"]).to_pydatetime()
         entry = {
             "peak_price": float(row["peak_price"]),
             "peak_date": peak_date,
-            "closing_price": float(row["closing_price"]),
+            "closing_price": (
+                float(row["closing_price"]) if pd.notna(row["closing_price"]) else None
+            ),
         }
-        if "initial_price" in df.columns and pd.notna(row.get("initial_price")):
-            entry["initial_price"] = float(row["initial_price"])
-        _PRICES[symbol] = entry
+        _PRICES[(symbol, year)] = entry
 
-    log.info(f"Loaded prices for {len(_PRICES)} symbol(s) from {prices_csv}")
+    log.info(f"Loaded {len(_PRICES)} symbol-year price row(s) from {prices_csv}")
 
 
-def _get_price_entry(symbol: str) -> dict:
-    if symbol not in _PRICES:
+# ─── Sales CSV ────────────────────────────────────────────────────────────────
+
+
+def _benefit_type(value) -> str:
+    return str(value).strip().upper() if pd.notna(value) else ""
+
+
+def load_sales(sales_csv: Path) -> pd.DataFrame:
+    """Load the sales CSV, sorted chronologically."""
+    df = pd.read_csv(sales_csv)
+    df.columns = df.columns.str.strip().str.lower()
+
+    required = {"symbol", "sale_date", "units", "sale_price"}
+    missing = required - set(df.columns)
+    if missing:
         raise ValueError(
-            f"{symbol}: no price entry in prices CSV. "
-            f"Add a row with peak_price, peak_date, closing_price for this symbol."
+            f"Sales CSV {sales_csv} is missing required columns: {missing}.\n"
+            f"Found columns: {list(df.columns)}"
         )
-    return _PRICES[symbol]
+
+    df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
+    df["benefit_type"] = (
+        df["benefit_type"].map(_benefit_type) if "benefit_type" in df.columns else ""
+    )
+    df["sale_date"] = pd.to_datetime(df["sale_date"])
+    df["acquisition_date"] = (
+        pd.to_datetime(df["acquisition_date"])
+        if "acquisition_date" in df.columns
+        else pd.NaT
+    )
+    df["units"] = df["units"].astype(float)
+    df["sale_price"] = df["sale_price"].astype(float)
+    df = df.sort_values("sale_date", kind="stable").reset_index(drop=True)
+
+    log.info(f"Loaded {len(df)} sale(s) from {sales_csv}")
+    return df
+
+
+def allocate_sales(lots: pd.DataFrame, sales: pd.DataFrame) -> dict:
+    """Match each sale to lots with the same symbol + benefit_type.
+
+    Uses the lot given by the sale's acquisition_date if set, otherwise FIFO
+    (oldest acquisition first). Returns {lot_index: [sale allocations]}.
+    """
+    remaining = lots["units"].astype(float).to_dict()
+    allocations = {idx: [] for idx in lots.index}
+    fifo = lots.sort_values("acq_date", kind="stable")
+
+    for _, sale in sales.iterrows():
+        candidates = fifo[
+            (fifo["symbol_norm"] == sale["symbol"])
+            & (fifo["benefit_type_norm"] == sale["benefit_type"])
+            & (fifo["acq_date"] <= sale["sale_date"])
+        ]
+        if pd.notna(sale["acquisition_date"]):
+            candidates = candidates[candidates["acq_date"] == sale["acquisition_date"]]
+
+        to_sell = sale["units"]
+        for idx in candidates.index:
+            if to_sell <= 1e-9:
+                break
+            take = min(remaining[idx], to_sell)
+            if take <= 1e-9:
+                continue
+            remaining[idx] -= take
+            to_sell -= take
+            allocations[idx].append(
+                {
+                    "sale_date": sale["sale_date"].to_pydatetime(),
+                    "units": take,
+                    "sale_price": sale["sale_price"],
+                }
+            )
+
+        if to_sell > 1e-9:
+            raise ValueError(
+                f"Sale of {sale['units']:g} {sale['symbol']} "
+                f"(benefit_type='{sale['benefit_type']}') on {sale['sale_date'].date()}: "
+                f"{to_sell:g} unit(s) could not be matched to any lot held on that date."
+            )
+
+    return allocations
+
+
+def _get_price_entry(symbol: str, year: int) -> dict:
+    key = (symbol, year)
+    if key not in _PRICES:
+        raise ValueError(
+            f"{symbol}: no price entry for {year} in prices CSV. "
+            f"Add a row with year={year}, peak_price, peak_date, closing_price for this symbol."
+        )
+    return _PRICES[key]
 
 
 # ─── Core Processing ──────────────────────────────────────────────────────────
@@ -214,17 +316,67 @@ SCHEDULE_FA_COLS = [
 ]
 
 
-def process_row(row: pd.Series) -> dict:
-    """Compute all Schedule FA fields (in INR) for one holding."""
+AUDIT_TRAIL_COLS = [
+    "symbol",
+    "benefit_type",
+    "units",
+    "units_at_start",
+    "acquisition_date",
+    "initial_price_usd",
+    "initial_source",
+    "initial_fx",
+    "initial_fx_date",
+    "initial_inr",
+    "peak_price_usd",
+    "peak_date",
+    "peak_fx",
+    "peak_fx_date",
+    "peak_inr",
+    "units_at_end",
+    "closing_price_usd",
+    "closing_fx",
+    "closing_fx_date",
+    "closing_inr",
+    "dividends_usd",
+    "dividends_inr",
+    "units_sold",
+    "sales",
+    "proceeds_usd",
+    "proceeds_inr",
+]
+
+
+def process_row(row: pd.Series, sales: list[dict]) -> tuple[dict, dict] | None:
+    """Compute all Schedule FA fields (in INR) for one holding.
+
+    Returns a tuple of (schedule_fa_row, audit_trail_row), or None if the lot
+    was not held during the CY.
+    """
     symbol = str(row["symbol"]).strip().upper()
     units = float(row["units"])
     # acquisition_date in the input CSV is expected as YYYY-MM-DD (e.g. 2024-03-01)
     acq_date = pd.to_datetime(row["acquisition_date"]).to_pydatetime()
 
-    log.info(f"\n{'─' * 60}")
-    log.info(f"  {symbol}  |  units={units}  |  acquired={acq_date.date()}")
+    sold_before = sum(s["units"] for s in sales if s["sale_date"] < CY_START)
+    sales_in_cy = [s for s in sales if CY_START <= s["sale_date"] <= CY_END]
+    units_at_start = units - sold_before
+    units_sold = sum(s["units"] for s in sales_in_cy)
+    units_at_end = units_at_start - units_sold
 
-    prices = _get_price_entry(symbol)
+    log.info(f"\n{'─' * 60}")
+    log.info(
+        f"  {symbol}  |  units={units}  |  acquired={acq_date.date()}  |  "
+        f"held at start={units_at_start}  sold in CY={units_sold}  held at end={units_at_end}"
+    )
+
+    if acq_date > CY_END:
+        log.info(f"  Skipped:  acquired after {CY_END.date()}")
+        return None
+    if units_at_start <= 1e-9:
+        log.info(f"  Skipped:  fully sold before {CY_START.date()}")
+        return None
+
+    prices = _get_price_entry(symbol, CY_START.year)
 
     # 1. Initial value of the investment
     #    The "initial value" is the ORIGINAL acquisition cost of the lot and is
@@ -242,7 +394,7 @@ def process_row(row: pd.Series) -> dict:
         if is_carry_forward
         else "Acquisition price"
     )
-    initial_units = units
+    initial_units = units_at_start
     initial_fx, initial_fx_date = get_sbi_tt_buy(initial_date)
     initial_inr = round(initial_price_usd * initial_fx * initial_units, 2)
     log.info(
@@ -254,29 +406,21 @@ def process_row(row: pd.Series) -> dict:
     peak_price_usd = prices["peak_price"]
     peak_date = prices["peak_date"]
     peak_fx, peak_fx_date = get_sbi_tt_buy(peak_date)
-    peak_inr = round(peak_price_usd * peak_fx * units, 2)
+    peak_inr = round(peak_price_usd * peak_fx * units_at_start, 2)
     log.info(
         f"  Peak:     ${peak_price_usd:.4f} on {peak_date.date()} (prices.csv) "
-        f"× ₹{peak_fx:.4f} × {units} = ₹{peak_inr:,.2f}  (SBI date used: {peak_fx_date.date()})"
+        f"× ₹{peak_fx:.4f} × {units_at_start} = ₹{peak_inr:,.2f}  (SBI date used: {peak_fx_date.date()})"
     )
 
     # 3. Closing balance — price on Dec 31 from prices CSV
-    # Sanity check: if there were sale proceeds during the CY, the user MUST
-    # set units_at_year_end explicitly (else we silently use `units`, which
-    # would double-count the sold shares in the closing balance).
-    proceeds_usd_val = float(row.get("proceeds_usd", 0) or 0)
-    has_year_end = (
-        "units_at_year_end" in row.index and pd.notna(row.get("units_at_year_end"))
-    )
-    if proceeds_usd_val > 0 and not has_year_end:
-        raise ValueError(
-            f"{symbol}: proceeds_usd={proceeds_usd_val} indicates a sale during the CY, "
-            "but units_at_year_end is not set. Provide units_at_year_end explicitly "
-            "(0 if fully sold, remaining units if partial sale)."
-        )
-    closing_units = float(row.get("units_at_year_end", units))
-    if closing_units > 0:
+    closing_units = units_at_end
+    if closing_units > 1e-9:
         closing_price_usd = prices["closing_price"]
+        if closing_price_usd is None:
+            raise ValueError(
+                f"{symbol}: {closing_units} units held at {CY_END.date()} but closing_price "
+                f"for {CY_START.year} is blank in prices CSV."
+            )
         closing_fx, closing_fx_date = get_sbi_tt_buy(CY_END)
         closing_inr = round(closing_price_usd * closing_fx * closing_units, 2)
         log.info(
@@ -284,16 +428,42 @@ def process_row(row: pd.Series) -> dict:
             f"= ₹{closing_inr:,.2f}  (SBI date used: {closing_fx_date.date()})"
         )
     else:
+        closing_price_usd = None
+        closing_fx = None
+        closing_fx_date = None
         closing_inr = 0.0
         log.info("  Closing:  ₹0  (position fully sold/closed during CY)")
 
-    # 4. Dividends & proceeds (USD → INR at SBI TT Buy on CY_END = Dec 31)
-    cy_end_fx, _ = get_sbi_tt_buy(CY_END)
-    dividends_inr = round(float(row.get("dividends_usd", 0) or 0) * cy_end_fx, 2)
-    proceeds_inr = round(float(row.get("proceeds_usd", 0) or 0) * cy_end_fx, 2)
+    # 4. Dividends (USD → INR at SBI TT Buy on CY_END = Dec 31)
+    dividends_raw = row.get("dividends_usd")
+    dividends_usd = float(dividends_raw) if pd.notna(dividends_raw) else 0.0
+    dividends_inr = 0.0
+    if dividends_usd:
+        cy_end_fx, _ = get_sbi_tt_buy(CY_END)
+        dividends_inr = round(dividends_usd * cy_end_fx, 2)
+
+    # 5. Gross sale proceeds (each sale: units × sale price × SBI TT Buy on sale date)
+    proceeds_usd = 0.0
+    proceeds_inr = 0.0
+    sale_notes = []
+    for s in sales_in_cy:
+        sale_fx, sale_fx_date = get_sbi_tt_buy(s["sale_date"])
+        gross_usd = s["units"] * s["sale_price"]
+        gross_inr = round(gross_usd * sale_fx, 2)
+        proceeds_usd += gross_usd
+        proceeds_inr += gross_inr
+        sale_notes.append(
+            f"{s['sale_date'].date()}: {s['units']:g} @ ${s['sale_price']:.4f} × ₹{sale_fx:.4f}"
+        )
+        log.info(
+            f"  Sale:     {s['units']:g} × ${s['sale_price']:.4f} on {s['sale_date'].date()} "
+            f"× ₹{sale_fx:.4f} = ₹{gross_inr:,.2f}  (SBI date used: {sale_fx_date.date()})"
+        )
+    proceeds_usd = round(proceeds_usd, 4)
+    proceeds_inr = round(proceeds_inr, 2)
     log.info(f"  Dividends: ₹{dividends_inr:,.2f}   Proceeds: ₹{proceeds_inr:,.2f}")
 
-    return {
+    fa_row = {
         "Country/Region name": row.get("country", "UNITED STATES OF AMERICA"),
         "Country Name and Code": row.get("country_code", 2),
         "Name of entity": row["company_name"],
@@ -308,8 +478,43 @@ def process_row(row: pd.Series) -> dict:
         "Total gross proceeds from sale or redemption of investment during the period": proceeds_inr,
     }
 
+    audit_row = {
+        "symbol": symbol,
+        "benefit_type": _benefit_type(row.get("benefit_type")),
+        "units": units,
+        "units_at_start": units_at_start,
+        "acquisition_date": acq_date.strftime("%Y-%m-%d"),
+        "initial_price_usd": round(initial_price_usd, 4),
+        "initial_source": initial_source,
+        "initial_fx": round(initial_fx, 4),
+        "initial_fx_date": initial_fx_date.strftime("%Y-%m-%d"),
+        "initial_inr": initial_inr,
+        "peak_price_usd": round(peak_price_usd, 4),
+        "peak_date": peak_date.strftime("%Y-%m-%d"),
+        "peak_fx": round(peak_fx, 4),
+        "peak_fx_date": peak_fx_date.strftime("%Y-%m-%d"),
+        "peak_inr": peak_inr,
+        "units_at_end": closing_units,
+        "closing_price_usd": (
+            round(closing_price_usd, 4) if closing_price_usd is not None else None
+        ),
+        "closing_fx": round(closing_fx, 4) if closing_fx is not None else None,
+        "closing_fx_date": (
+            closing_fx_date.strftime("%Y-%m-%d") if closing_fx_date is not None else None
+        ),
+        "closing_inr": closing_inr,
+        "dividends_usd": dividends_usd,
+        "dividends_inr": dividends_inr,
+        "units_sold": units_sold,
+        "sales": "; ".join(sale_notes),
+        "proceeds_usd": proceeds_usd,
+        "proceeds_inr": proceeds_inr,
+    }
 
-def generate(input_csv: Path, output_csv: Path) -> None:
+    return fa_row, audit_row
+
+
+def generate(input_csv: Path, output_csv: Path, sales_csv: Path | None = None) -> None:
     df = pd.read_csv(input_csv)
     df.columns = df.columns.str.strip().str.lower()
 
@@ -330,18 +535,35 @@ def generate(input_csv: Path, output_csv: Path) -> None:
             f"See input_template.csv for the expected format."
         )
 
-    rows, errors, units_records = [], [], []
-    for i, (_, row) in enumerate(df.iterrows(), 1):
+    df["symbol_norm"] = df["symbol"].astype(str).str.strip().str.upper()
+    df["benefit_type_norm"] = (
+        df["benefit_type"].map(_benefit_type) if "benefit_type" in df.columns else ""
+    )
+    df["acq_date"] = pd.to_datetime(df["acquisition_date"])
+
+    if sales_csv is not None:
         try:
-            rows.append(process_row(row))
-            units_val = float(row["units"])
-            end_raw = row.get("units_at_year_end")
-            end_val = float(end_raw) if pd.notna(end_raw) else units_val
+            allocations = allocate_sales(df, load_sales(sales_csv))
+        except ValueError as e:
+            log.error(str(e))
+            sys.exit(1)
+    else:
+        allocations = {idx: [] for idx in df.index}
+
+    rows, audit_rows, errors, units_records = [], [], [], []
+    for i, (idx, row) in enumerate(df.iterrows(), 1):
+        try:
+            result = process_row(row, allocations[idx])
+            if result is None:
+                continue
+            fa_row, audit_row = result
+            rows.append(fa_row)
+            audit_rows.append(audit_row)
             units_records.append(
                 {
-                    "symbol": str(row["symbol"]).strip().upper(),
-                    "start": units_val,
-                    "end": end_val,
+                    "symbol": audit_row["symbol"],
+                    "start": audit_row["units_at_start"],
+                    "end": audit_row["units_at_end"],
                 }
             )
         except Exception as e:
@@ -350,6 +572,10 @@ def generate(input_csv: Path, output_csv: Path) -> None:
 
     out_df = pd.DataFrame(rows, columns=SCHEDULE_FA_COLS)
     out_df.to_csv(output_csv, index=False)
+
+    audit_csv = output_csv.with_name(f"{output_csv.stem}_audit_trail.csv")
+    audit_df = pd.DataFrame(audit_rows, columns=AUDIT_TRAIL_COLS)
+    audit_df.to_csv(audit_csv, index=False)
 
     if not out_df.empty:
         total_initial = out_df["Initial value of the investment"].sum()
@@ -394,7 +620,8 @@ def generate(input_csv: Path, output_csv: Path) -> None:
             print(f"   Row {i} ({sym}): {msg}")
 
     print(f"\n✅  Saved → {output_csv.resolve()}")
-    print(f"📋  Log   → {(BASE_DIR / 'schedule_fa.log').resolve()}")
+    print(f"🧾  Audit → {audit_csv.resolve()}")
+    print(f"📋  Log   → {LOG_FILE.resolve()}")
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -405,16 +632,28 @@ def main() -> None:
         description="Generate Schedule FA CSV for Indian ITR from IB holdings "
         "using a manually-supplied prices CSV (no yfinance)."
     )
-    parser.add_argument("input_csv", help="Path to input holdings CSV")
+    parser.add_argument(
+        "input_csv",
+        nargs="?",
+        default=str(INPUTS_DIR / "input.csv"),
+        help="Path to input holdings CSV (default: inputs/input.csv)",
+    )
     parser.add_argument(
         "--prices",
-        required=True,
-        help="Path to prices CSV (symbol, peak_price, peak_date, closing_price[, initial_price])",
+        default=str(INPUTS_DIR / "prices.csv"),
+        help="Path to prices CSV (symbol, year, peak_price, peak_date, closing_price) "
+        "(default: inputs/prices.csv)",
+    )
+    parser.add_argument(
+        "--sales",
+        default=None,
+        help="Path to sales CSV (symbol, sale_date, units, sale_price[, benefit_type, acquisition_date]) "
+        "(default: inputs/sales.csv if it exists)",
     )
     parser.add_argument(
         "--output",
-        default="schedule_fa_output.csv",
-        help="Output CSV filename (default: schedule_fa_output.csv)",
+        default="output.csv",
+        help="Output CSV filename, written to outputs/ (default: output.csv)",
     )
     parser.add_argument(
         "--year",
@@ -426,6 +665,8 @@ def main() -> None:
         "--skip-update", action="store_true", help="Skip git pull for sbi-fx-ratekeeper"
     )
     args = parser.parse_args()
+
+    setup_logging()
 
     global CY_START, CY_END
     CY_START = datetime(args.year, 1, 1)
@@ -442,13 +683,23 @@ def main() -> None:
     load_prices(prices_csv)
 
     input_csv = Path(args.input_csv)
-    output_csv = BASE_DIR / args.output
+    output_csv = OUTPUTS_DIR / args.output
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
 
     if not input_csv.exists():
         log.error(f"Input file not found: {input_csv}")
         sys.exit(1)
 
-    generate(input_csv, output_csv)
+    if args.sales:
+        sales_csv = Path(args.sales)
+        if not sales_csv.exists():
+            log.error(f"Sales file not found: {sales_csv}")
+            sys.exit(1)
+    else:
+        default_sales = INPUTS_DIR / "sales.csv"
+        sales_csv = default_sales if default_sales.exists() else None
+
+    generate(input_csv, output_csv, sales_csv)
 
 
 if __name__ == "__main__":

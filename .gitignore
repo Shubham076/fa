@@ -1,5 +1,9 @@
 .venv/
-*.log
 sbi-fx-ratekeeper/
 .idea
-schedule_fa_output.csv
+*.log
+inputs/
+outputs/
+logs/
+__pycache__/
+.pytest_cache/

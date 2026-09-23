@@ -11,6 +11,13 @@ yfinance = "^0.2.38"
 pandas = "^2.0.0"
 requests = "^2.31.0"
 
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4"
+
+[tool.pytest.ini_options]
+testpaths = ["v1/tests", "v2/tests"]
+addopts = "--import-mode=importlib"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
