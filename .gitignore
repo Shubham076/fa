@@ -7,3 +7,5 @@ outputs/
 logs/
 __pycache__/
 .pytest_cache/
+pyvenv.cfg
+pyvenv.cfg
