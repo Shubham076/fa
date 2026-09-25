@@ -4,14 +4,14 @@ Generates the **Schedule FA** (foreign assets) table for the Indian ITR from you
 US equity lots (RSUs, stock options, stocks). Prices come from a CSV you maintain
 (e.g. Google Sheets `GOOGLEFINANCE`); USD → INR uses the **SBI TT Buy** rate from
 [sbi-fx-ratekeeper](https://github.com/sahilgupta/sbi-fx-ratekeeper) (cloned automatically
-next to `v1/` and `v2/`).
+at the repo root, shared by `fa/` and `cg/`).
 
 Schedule FA is reported per **calendar year** (Jan 1 – Dec 31).
 
 ## Folder layout
 
 ```
-v2/
+fa/v2/
 ├── main.py            # Schedule FA generator
 ├── cash_balance.py    # cash peak/closing from an E*TRADE statement PDF
 ├── inputs/            # YOUR data — git-ignored, never committed
@@ -54,13 +54,18 @@ ACME,2025,25.00,2025-02-14,22.00
 ### `inputs/sales.csv`
 
 ```csv
-symbol,benefit_type,sale_date,units,sale_price
-ACME,RSU,2025-09-15,40,24.00
+symbol,benefit_type,sale_date,units,sale_price,acquisition_date
+ACME,RSU,2025-09-15,40,24.00,2025-03-05
+ACME,SO,2025-09-15,100,24.00,
 ```
 
-- Optional: `acquisition_date` to sell from a specific lot; otherwise sales are matched
-  **FIFO** (oldest lot first) among lots with the same `symbol` + `benefit_type` acquired on
-  or before the sale date. Selling more than held stops the run with an error.
+- `acquisition_date` picks the lot being sold and must equal that lot's `acquisition_date`
+  in `input.csv`.
+  - **RSU:** required — use the vest date shown for each lot on the broker statement.
+  - **Options / other types:** may be blank; sales are then matched **FIFO** (oldest lot
+    first) among lots with the same `symbol` + `benefit_type` acquired on or before the
+    sale date.
+- Selling more than held stops the run with an error.
 
 ## How values are computed
 
@@ -84,12 +89,12 @@ python3 -m venv .venv            # from the repo root
 
 ## Run
 
-From the repo root (paths default to `v2/inputs/…`):
+From the repo root (paths default to `fa/v2/inputs/…`):
 
 ```bash
-.venv/bin/python v2/main.py --year 2025
-.venv/bin/python v2/main.py --year 2026 --output output_2026.csv
-.venv/bin/python v2/main.py --year 2025 --skip-update     # don't git pull SBI rates
+.venv/bin/python fa/v2/main.py --year 2025
+.venv/bin/python fa/v2/main.py --year 2026 --output output_2026.csv
+.venv/bin/python fa/v2/main.py --year 2025 --skip-update     # don't git pull SBI rates
 ```
 
 Outputs:
@@ -118,9 +123,9 @@ One row per lot, in the same order as `output.csv`:
 Everything in `inputs/`, `outputs/` and `logs/` is git-ignored, so experiment freely:
 
 ```bash
-cp v2/inputs/input.csv v2/inputs/input_test.csv          # edit the copy
-.venv/bin/python v2/main.py v2/inputs/input_test.csv \
-    --sales v2/inputs/sales_test.csv --year 2026 --output output_test.csv
+cp fa/v2/inputs/input.csv fa/v2/inputs/input_test.csv          # edit the copy
+.venv/bin/python fa/v2/main.py fa/v2/inputs/input_test.csv \
+    --sales fa/v2/inputs/sales_test.csv --year 2026 --output output_test.csv
 ```
 
 Run `git status` before committing — no file under `inputs/` should ever appear.
@@ -128,7 +133,7 @@ Run `git status` before committing — no file under `inputs/` should ever appea
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest v2/tests -q       # v2 only
+.venv/bin/python -m pytest fa/v2/tests -q       # v2 only
 .venv/bin/python -m pytest -q                # v1 + v2 (from repo root)
 ```
 
@@ -149,5 +154,5 @@ Rebuilds the daily cash balance from an E*TRADE / Morgan Stanley client statemen
 find the true cash peak and closing balance:
 
 ```bash
-.venv/bin/python v2/cash_balance.py /path/to/ClientStatements.pdf --year 2025 --inr
+.venv/bin/python fa/v2/cash_balance.py /path/to/ClientStatements.pdf --year 2025 --inr
 ```

@@ -61,7 +61,7 @@ CY_START = datetime(2024, 1, 1)
 CY_END = datetime(2024, 12, 31)
 
 BASE_DIR = Path(__file__).parent
-REPO_ROOT = BASE_DIR.parent
+REPO_ROOT = BASE_DIR.parents[1]
 INPUTS_DIR = BASE_DIR / "inputs"
 OUTPUTS_DIR = BASE_DIR / "outputs"
 LOGS_DIR = BASE_DIR / "logs"
@@ -238,6 +238,16 @@ def load_sales(sales_csv: Path) -> pd.DataFrame:
     df["sale_price"] = df["sale_price"].astype(float)
     df = df.sort_values("sale_date", kind="stable").reset_index(drop=True)
 
+    rsu_no_lot = df[(df["benefit_type"] == "RSU") & df["acquisition_date"].isna()]
+    if not rsu_no_lot.empty:
+        listed = ", ".join(
+            f"{r.symbol} {r.units:g} on {r.sale_date.date()}" for r in rsu_no_lot.itertuples()
+        )
+        raise ValueError(
+            f"Sales CSV {sales_csv}: RSU sales need acquisition_date (vest date from the "
+            f"broker statement). Missing for: {listed}"
+        )
+
     log.info(f"Loaded {len(df)} sale(s) from {sales_csv}")
     return df
 
@@ -245,7 +255,7 @@ def load_sales(sales_csv: Path) -> pd.DataFrame:
 def allocate_sales(lots: pd.DataFrame, sales: pd.DataFrame) -> dict:
     """Match each sale to lots with the same symbol + benefit_type.
 
-    Uses the lot given by the sale's acquisition_date if set, otherwise FIFO
+    Uses the lot given by the sale's acquisition_date if set (always set for RSU), otherwise FIFO
     (oldest acquisition first). Returns {lot_index: [sale allocations]}.
     """
     remaining = lots["units"].astype(float).to_dict()

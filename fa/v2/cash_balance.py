@@ -40,7 +40,7 @@ from datetime import date
 from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
-REPO_ROOT = BASE_DIR.parent
+REPO_ROOT = BASE_DIR.parents[1]
 RATEKEEPER_DIR = REPO_ROOT / "sbi-fx-ratekeeper"
 
 MONTHS = [

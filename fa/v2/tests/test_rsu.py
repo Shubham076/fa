@@ -2,6 +2,8 @@
 
 import pytest
 
+SALES_HEADER_WITH_LOT = "symbol,benefit_type,sale_date,units,sale_price,acquisition_date\n"
+
 
 @pytest.fixture
 def priced(fa, set_rates, write, cols):
@@ -90,10 +92,45 @@ def test_generate_rsu_held_while_options_sold(fa, run_generate, input_csv, cols)
 def test_generate_partial_rsu_sale(fa, run_generate, input_csv, cols):
     out, _ = run_generate(
         input_csv({"benefit_type": "RSU", "units": 4}),
-        sales_text=cols["sales_header"] + "S,RSU,2026-05-04,1,19\n",
+        sales_text=SALES_HEADER_WITH_LOT + "S,RSU,2026-05-04,1,19,2025-06-02\n",
     )
     assert out[cols["closing"]].tolist() == [15 * 100 * 3]
     assert out[cols["proceeds"]].tolist() == [19 * 88]
+
+
+def test_rsu_sale_without_acquisition_date_raises(fa, write, cols):
+    path = write("sales.csv", cols["sales_header"] + "S,RSU,2026-05-04,1,19\n")
+    with pytest.raises(ValueError, match="RSU sales need acquisition_date.*S 1 on 2026-05-04"):
+        fa.load_sales(path)
+
+
+def test_rsu_sale_with_blank_acquisition_date_raises(fa, write):
+    path = write("sales.csv", SALES_HEADER_WITH_LOT + "S,RSU,2026-05-04,1,19,\n")
+    with pytest.raises(ValueError, match="RSU sales need acquisition_date"):
+        fa.load_sales(path)
+
+
+def test_option_sale_without_acquisition_date_is_fine(fa, write):
+    sales = fa.load_sales(write("sales.csv", SALES_HEADER_WITH_LOT + "S,SO,2026-05-04,1,19,\n"))
+    assert sales["acquisition_date"].isna().all()
+
+
+def test_rsu_sale_takes_only_the_named_lot(fa, write, make_lots):
+    lots = make_lots([("S", "RSU", 10, "2024-01-01"), ("S", "RSU", 10, "2024-06-01")])
+    sales = fa.load_sales(
+        write("sales.csv", SALES_HEADER_WITH_LOT + "S,RSU,2024-09-01,4,5,2024-06-01\n")
+    )
+    alloc = fa.allocate_sales(lots, sales)
+    assert alloc[0] == []
+    assert [a["units"] for a in alloc[1]] == [4.0]
+
+
+def test_generate_rsu_sale_without_acquisition_date_exits(fa, run_generate, input_csv, cols):
+    with pytest.raises(SystemExit):
+        run_generate(
+            input_csv({"benefit_type": "RSU", "units": 4}),
+            sales_text=cols["sales_header"] + "S,RSU,2026-05-04,1,19\n",
+        )
 
 
 def test_generate_without_sales_everything_held(fa, run_generate, input_csv, cols):

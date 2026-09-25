@@ -1,7 +1,7 @@
 [tool.poetry]
-name = "schedule-fa-generator"
+name = "schedules"
 version = "0.1.0"
-description = "Generate Schedule FA CSV for Indian ITR from Interactive Brokers holdings"
+description = "Generate Schedule FA and Schedule CG tables for Indian ITR from foreign stock holdings"
 authors = []
 package-mode = false
 
@@ -15,7 +15,7 @@ requests = "^2.31.0"
 pytest = "^8.4"
 
 [tool.pytest.ini_options]
-testpaths = ["v1/tests", "v2/tests"]
+testpaths = ["fa/v1/tests", "fa/v2/tests", "cg/tests"]
 addopts = "--import-mode=importlib"
 
 [build-system]
